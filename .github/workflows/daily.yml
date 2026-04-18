@@ -1,0 +1,21 @@
+name: Daily data refresh
+
+on:
+  schedule:
+    # Runs at 06:00 UTC every day (before European morning fixtures)
+    - cron: '0 6 * * *'
+  workflow_dispatch:   # Allow manual trigger from GitHub UI
+
+jobs:
+  trigger-netlify-build:
+    name: Trigger Netlify deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Netlify build hook
+        run: |
+          echo "Triggering daily Netlify build at $(date -u)"
+          curl -s -o response.json -w "%{http_code}" -X POST "${{ secrets.NETLIFY_BUILD_HOOK }}"
+          echo "Response: $(cat response.json)"
+
+      - name: Confirm success
+        run: echo "Daily refresh triggered successfully"

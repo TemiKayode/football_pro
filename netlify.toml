@@ -1,0 +1,89 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# API routes first (Netlify uses first matching rule; SPA catch-all must be last)
+[[redirects]]
+  from = "/api/matches"
+  to = "/.netlify/functions/matches"
+  status = 200
+
+[[redirects]]
+  from = "/api/picks"
+  to = "/.netlify/functions/picks"
+  status = 200
+
+[[redirects]]
+  from = "/api/scores"
+  to = "/.netlify/functions/scores"
+  status = 200
+
+[[redirects]]
+  from = "/api/status"
+  to = "/.netlify/functions/status"
+  status = 200
+
+[[redirects]]
+  from = "/api/prepare"
+  to = "/.netlify/functions/prepare"
+  status = 200
+
+[[redirects]]
+  from = "/api/train"
+  to = "/.netlify/functions/train"
+  status = 200
+
+[[redirects]]
+  from = "/api/clv/update"
+  to = "/.netlify/functions/clvUpdate"
+  status = 200
+
+[[redirects]]
+  from = "/api/clv"
+  to = "/.netlify/functions/clv"
+  status = 200
+
+[[redirects]]
+  from = "/api/kelly"
+  to = "/.netlify/functions/kelly"
+  status = 200
+
+[[redirects]]
+  from = "/api/live"
+  to = "/.netlify/functions/live"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Security headers
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+# Cache: static assets long, API never
+[[headers]]
+  for = "/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/.netlify/functions/*"
+  [headers.values]
+    Cache-Control = "no-store, no-cache, must-revalidate"
+    Access-Control-Allow-Origin = "*"
+
+# Functions config
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["netlify/functions/**"]

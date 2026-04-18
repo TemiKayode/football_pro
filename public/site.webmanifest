@@ -1,0 +1,16 @@
+{
+  "name": "Football Pro",
+  "short_name": "Football Pro",
+  "description": "8-Layer Intelligence Engine — live odds, value picks, accumulators",
+  "icons": [
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "theme_color": "#0a0c12",
+  "background_color": "#0a0c12",
+  "display": "standalone"
+}

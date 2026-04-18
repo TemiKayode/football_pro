@@ -1,0 +1,21 @@
+{
+  "name": "football-value-bot",
+  "version": "2.0.0",
+  "description": "Live football value betting dashboard — top 10 leagues, real-time odds, Netlify-ready",
+  "private": true,
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "node scripts/sync-public.cjs",
+    "deploy": "netlify deploy --prod --build",
+    "netlify:login": "netlify login",
+    "netlify:status": "netlify status"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["football", "betting", "value", "odds", "netlify"],
+  "license": "MIT"
+}
