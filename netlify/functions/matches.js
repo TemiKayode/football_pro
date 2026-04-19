@@ -4,7 +4,9 @@
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
+const SPORTMONKS_KEY = process.env.SPORTMONKS_KEY || "";
 const BASE = "https://api.the-odds-api.com/v4";
+const SM_BASE = "https://api.sportmonks.com/v3/football";
 // AF_ODDS_ENABLED: opt-in only — adds 12 API-Football calls/refresh which burns free-tier (100/day) fast.
 // Set AF_ODDS_ENABLED=true in Netlify env only if you have a paid AF plan.
 const AF_ODDS_ENABLED = process.env.AF_ODDS_ENABLED === "true";
@@ -190,6 +192,109 @@ function applyAfOdds(fixtures, oddsMap) {
       modelReady: true,
     };
   });
+}
+
+// ── Sportmonks integration ────────────────────────────────────────────────────
+
+function mapSmToMatch(item) {
+  const home = (item.participants || []).find(p => p.meta?.location === "home");
+  const away = (item.participants || []).find(p => p.meta?.location === "away");
+  if (!home || !away) return null;
+
+  const kickoff = item.starting_at_timestamp
+    ? new Date(item.starting_at_timestamp * 1000).toISOString()
+    : (item.starting_at || new Date().toISOString());
+  const minsToKO = Math.round((new Date(kickoff).getTime() - Date.now()) / 60000);
+
+  // SM state IDs: 1=NS, 2=1H, 3=HT, 4=2H, 5=ET, 6=PEN, 7=FT, 10=CANC
+  const stateId = item.state_id;
+  const isLive = [2, 3, 4, 5, 6].includes(stateId);
+
+  const league = item.league || {};
+
+  // Extract best 1X2 odds from the flat odds array Sportmonks returns
+  let bestH = 0, bestD = 0, bestA = 0;
+  for (const o of (item.odds || [])) {
+    const desc = String(o.market_description || o.name || "").toLowerCase();
+    if (!desc.includes("3way") && !desc.includes("match winner") && !desc.includes("result") && !desc.includes("1x2") && !desc.includes("full time")) continue;
+    const label = String(o.label || o.name || "").toLowerCase();
+    const val = parseFloat(o.value || o.odd || "0");
+    if (val < 1.02) continue;
+    if (label === "home" || label === "1")        bestH = Math.max(bestH, val);
+    else if (label === "draw" || label === "x")   bestD = Math.max(bestD, val);
+    else if (label === "away" || label === "2")   bestA = Math.max(bestA, val);
+  }
+
+  const probs = (bestH > 1 && bestD > 1 && bestA > 1) ? removVig(bestH, bestD, bestA) : null;
+  let xgData = null, probsData = null;
+  if (probs) {
+    const { xgH, xgA } = estimateXG(probs.H, probs.D, probs.A);
+    const o25 = over25Prob(xgH, xgA);
+    xgData = { home: xgH, away: xgA };
+    probsData = { H: probs.H, D: probs.D, A: probs.A, O25: o25, U25: 100 - o25 };
+  }
+
+  return {
+    id: `sm_${item.id}`,
+    home: home.name,
+    away: away.name,
+    league: String(league.id || "sm"),
+    leagueName: league.name || "Football",
+    leagueFlag: "⚽",
+    country: "",
+    kickoff,
+    minsToKO,
+    isLive,
+    isToday: new Date(kickoff).toDateString() === new Date().toDateString(),
+    isTomorrow: new Date(kickoff).toDateString() === new Date(Date.now() + 86400000).toDateString(),
+    odds: probs
+      ? { home: bestH, draw: bestD, away: bestA, over25: 0, under25: 0 }
+      : { home: 0, draw: 0, away: 0, over25: 0, under25: 0 },
+    bks: { home: "SM", draw: "SM", away: "SM", over: "", under: "" },
+    probs: probsData,
+    xg: xgData,
+    modelReady: probs != null,
+    source: "sportmonks",
+  };
+}
+
+async function getSportmonksFixtures() {
+  if (!SPORTMONKS_KEY) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const inc = "participants;league;state;odds";
+  const opts = { signal: AbortSignal.timeout(15000) };
+  try {
+    const [r1, r2, rLive] = await Promise.all([
+      fetch(`${SM_BASE}/fixtures/date/${today}?api_token=${SPORTMONKS_KEY}&include=${inc}`, opts),
+      fetch(`${SM_BASE}/fixtures/date/${tomorrow}?api_token=${SPORTMONKS_KEY}&include=${inc}`, opts),
+      fetch(`${SM_BASE}/livescores/latest?api_token=${SPORTMONKS_KEY}&include=${inc}`, opts),
+    ]);
+    const [d1, d2, dLive] = await Promise.all([
+      r1.ok ? r1.json() : { data: [] },
+      r2.ok ? r2.json() : { data: [] },
+      rLive.ok ? rLive.json() : { data: [] },
+    ]);
+    const byId = new Map();
+    for (const item of [...(d1.data || []), ...(d2.data || []), ...(dLive.data || [])]) {
+      if (!item?.id) continue;
+      const mapped = mapSmToMatch(item);
+      if (!mapped) continue;
+      // Live takes priority
+      if (!byId.has(item.id) || mapped.isLive) byId.set(item.id, mapped);
+    }
+    const all = [...byId.values()];
+    all.sort((a, b) => {
+      if (a.isLive && !b.isLive) return -1;
+      if (!a.isLive && b.isLive) return 1;
+      return new Date(a.kickoff) - new Date(b.kickoff);
+    });
+    console.log(JSON.stringify({ level: "info", event: "sm_fixtures", total: all.length, priced: all.filter(m => m.modelReady).length }));
+    return all;
+  } catch (e) {
+    console.error("Sportmonks fetch failed:", e.message);
+    return [];
+  }
 }
 
 async function fetchLeague(leagueKey) {
@@ -426,6 +531,25 @@ exports.handler = async (event) => {
   }
 
   if (!ODDS_API_KEY) {
+    // Sportmonks: fixtures + pre-match odds in one request, ~200 req/hour free
+    const sm = await getSportmonksFixtures();
+    if (sm.length) {
+      const priced = sm.filter(m => m.modelReady).length;
+      const payload = {
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: sm,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(sm.map(m => m.league)).size,
+        note: priced > 0
+          ? `${priced} of ${sm.length} matches priced via Sportmonks. Set ODDS_API_KEY for full cross-bookmaker coverage.`
+          : "Fixtures from Sportmonks (no odds returned on current plan). Set ODDS_API_KEY for predictions.",
+        stale: false,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
     // Prefer real fixtures if football-data key is available.
     const rows = await getAllScoreboardRows().catch(() => []);
     if (rows.length) {
@@ -490,6 +614,25 @@ exports.handler = async (event) => {
 
   if (allMatches.length === 0) {
     console.warn(JSON.stringify({ level: "warn", event: "matches_empty_provider", fixtureFallback: true }));
+    // Sportmonks as first fallback when Odds API quota is exhausted
+    const sm = await getSportmonksFixtures();
+    if (sm.length) {
+      const priced = sm.filter(m => m.modelReady).length;
+      const payload = {
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: sm,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(sm.map(m => m.league)).size,
+        note: priced > 0
+          ? `Odds API quota exhausted. ${priced} matches priced via Sportmonks odds. Renew ODDS_API_KEY for full coverage.`
+          : "Odds API quota exhausted. Fixtures from Sportmonks — odds not on current plan.",
+        stale: true,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
     // If quota is exhausted/provider fails, fallback to real fixtures from football-data.
     const rows = await getAllScoreboardRows().catch(() => []);
     if (rows.length) {
