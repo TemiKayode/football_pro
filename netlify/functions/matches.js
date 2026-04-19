@@ -3,7 +3,24 @@
 // Called by the frontend every 60 seconds for real-time updates
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
+const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
 const BASE = "https://api.the-odds-api.com/v4";
+const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
+const { getAllScoreboardRows } = require("./scores");
+let cachedResponse = null;
+let cachedAt = 0;
+
+function buildEmptyMatches(note) {
+  return {
+    dataMode: "none",
+    matches: [],
+    updated: new Date().toISOString(),
+    leagues: TOP_LEAGUES,
+    totalLeagues: 0,
+    stale: true,
+    note: note || "No live data available. Configure ODDS_API_KEY for odds, and FOOTBALL_DATA_KEY or API_FOOTBALL_KEY for fixtures.",
+  };
+}
 
 // Top 10 leagues worldwide — priority order
 const TOP_LEAGUES = [
@@ -13,6 +30,8 @@ const TOP_LEAGUES = [
   { key: "soccer_italy_serie_a",          name: "Serie A",             country: "Italy",     flag: "🇮🇹" },
   { key: "soccer_france_ligue_one",       name: "Ligue 1",             country: "France",    flag: "🇫🇷" },
   { key: "soccer_champions_league",       name: "Champions League",    country: "Europe",    flag: "🏆" },
+  { key: "soccer_europa_league",          name: "Europa League",       country: "Europe",    flag: "🏆" },
+  { key: "soccer_uefa_europa_conference_league", name: "Conference League", country: "Europe", flag: "🏆" },
   { key: "soccer_netherlands_eredivisie", name: "Eredivisie",          country: "Netherlands",flag: "🇳🇱" },
   { key: "soccer_portugal_primeira_liga", name: "Primeira Liga",       country: "Portugal",  flag: "🇵🇹" },
   { key: "soccer_brazil_campeonato",      name: "Brasileirão",         country: "Brazil",    flag: "🇧🇷" },
@@ -30,32 +49,77 @@ function removVig(h, d, a) {
   };
 }
 
-// Simple Poisson xG estimation from implied probabilities
-function estimateXG(pH, pA) {
-  const pH_dec = pH / 100;
-  const pA_dec = pA / 100;
-  // Rough inverse: solve lambda from win probability
-  // lambda_home ≈ -ln(1 - pH) * 1.35 (calibrated constant)
-  const xgH = Math.max(0.5, Math.min(4.5, -Math.log(1 - Math.min(pH_dec, 0.99)) * 1.35));
-  const xgA = Math.max(0.3, Math.min(3.5, -Math.log(1 - Math.min(pA_dec, 0.99)) * 1.1));
-  return { xgH: Math.round(xgH * 100) / 100, xgA: Math.round(xgA * 100) / 100 };
+function factorial(n) {
+  return n <= 1 ? 1 : n * factorial(n - 1);
 }
 
-// Poisson over 2.5 probability
+const RHO = -0.13; // Dixon-Coles low-score correlation
+
+function poissonPmf(k, lam) {
+  if (lam <= 0) return k === 0 ? 1 : 0;
+  return Math.exp(-lam + k * Math.log(lam) - Math.log(factorial(k)));
+}
+
+function dcFactor(lh, la, i, j) {
+  if (i === 0 && j === 0) return 1 - lh * la * RHO;
+  if (i === 1 && j === 0) return 1 + la * RHO;
+  if (i === 0 && j === 1) return 1 + lh * RHO;
+  if (i === 1 && j === 1) return 1 - RHO;
+  return 1;
+}
+
+function poissonProbs(lh, la, maxG = 8) {
+  let pH = 0, pD = 0, pA = 0;
+  for (let i = 0; i <= maxG; i++) {
+    const piH = poissonPmf(i, lh);
+    for (let j = 0; j <= maxG; j++) {
+      const dc = i <= 1 && j <= 1 ? dcFactor(lh, la, i, j) : 1;
+      const p = piH * poissonPmf(j, la) * dc;
+      if (i > j) pH += p;
+      else if (i === j) pD += p;
+      else pA += p;
+    }
+  }
+  return { pH, pD, pA };
+}
+
+// Invert 1X2 implied probs to (xgH, xgA) via DC-corrected Poisson + coordinate descent
+function estimateXG(pH, pD, pA) {
+  const tH = pH / 100, tD = pD / 100;
+  const objective = (lh, la) => {
+    const r = poissonProbs(lh, la);
+    return (r.pH - tH) ** 2 + (r.pD - tD) ** 2;
+  };
+  let lh = 1.4, la = 1.1, step = 0.1;
+  let best = objective(lh, la);
+  for (let iter = 0; iter < 5; iter++) {
+    let improved = true;
+    while (improved) {
+      improved = false;
+      for (const [dlh, dla] of [[step,0],[-step,0],[0,step],[0,-step]]) {
+        const nlh = Math.max(0.3, Math.min(5.5, lh + dlh));
+        const nla = Math.max(0.2, Math.min(4.5, la + dla));
+        const e = objective(nlh, nla);
+        if (e < best) { best = e; lh = nlh; la = nla; improved = true; }
+      }
+    }
+    step /= 2;
+  }
+  return { xgH: Math.round(lh * 100) / 100, xgA: Math.round(la * 100) / 100 };
+}
+
+// DC-corrected Over 2.5 probability
 function over25Prob(xgH, xgA) {
   let under = 0;
   for (let i = 0; i <= 2; i++) {
     for (let j = 0; j <= 2 - i; j++) {
-      const pH = Math.exp(-xgH) * Math.pow(xgH, i) / factorial(i);
-      const pA = Math.exp(-xgA) * Math.pow(xgA, j) / factorial(j);
-      under += pH * pA;
+      const dc = i <= 1 && j <= 1 ? dcFactor(xgH, xgA, i, j) : 1;
+      const ph = Math.exp(-xgH) * Math.pow(xgH, i) / factorial(i);
+      const pa = Math.exp(-xgA) * Math.pow(xgA, j) / factorial(j);
+      under += ph * pa * dc;
     }
   }
   return Math.round((1 - under) * 1000) / 10;
-}
-
-function factorial(n) {
-  return n <= 1 ? 1 : n * factorial(n - 1);
 }
 
 // Kelly criterion
@@ -106,7 +170,7 @@ async function fetchLeague(leagueKey) {
       const probs = removVig(bestH, bestD, bestA);
       if (!probs) return null;
 
-      const { xgH, xgA } = estimateXG(probs.H, probs.A);
+      const { xgH, xgA } = estimateXG(probs.H, probs.D, probs.A);
       const o25 = over25Prob(xgH, xgA);
       const edge = {
         H:   probs.H - Math.round(100/bestH * 10) / 10,
@@ -138,6 +202,7 @@ async function fetchLeague(leagueKey) {
         bks: { home: bestBkH, draw: bestBkD, away: bestBkA, over: bestBkO, under: bestBkU },
         probs: { H: probs.H, D: probs.D, A: probs.A, O25: o25, U25: 100 - o25 },
         xg: { home: xgH, away: xgA },
+        modelReady: true,
         edge,
         valueH: edge.H > 3,
         valueD: edge.D > 3,
@@ -154,25 +219,191 @@ async function fetchLeague(leagueKey) {
   }
 }
 
-exports.handler = async (event) => {
-  const headers = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Content-Type": "application/json",
-    "Cache-Control": "no-cache, max-age=0",
+function fixtureRowsToMatches(rows) {
+  const now = Date.now();
+  return (rows || []).map((m) => {
+    const kickoff = m.kickoff || new Date().toISOString();
+    const minsToKO = Math.round((new Date(kickoff).getTime() - now) / 60000);
+    return {
+      id: `fd_${m.id}`,
+      home: m.home,
+      away: m.away,
+      league: (m.competition || "football").toLowerCase(),
+      leagueName: m.compName || m.competition || "Football",
+      leagueFlag: m.flag || "⚽",
+      country: "",
+      kickoff,
+      minsToKO,
+      isLive: ["IN_PLAY", "PAUSED", "LIVE"].includes(m.status),
+      isToday: new Date(kickoff).toDateString() === new Date().toDateString(),
+      isTomorrow:
+        new Date(kickoff).toDateString() ===
+        new Date(Date.now() + 86400000).toDateString(),
+      odds: { home: 0, draw: 0, away: 0, over25: 0, under25: 0 },
+      bks: { home: "", draw: "", away: "", over: "", under: "" },
+      probs: null,
+      xg: null,
+      modelReady: false,
+      source: "football-data",
+    };
+  });
+}
+
+const AF_LIVE_SHORT = new Set(["1H", "HT", "2H", "ET", "P", "BT", "LIVE", "INT"]);
+
+function mapApiFootballFixtureItem(item) {
+  const f = item?.fixture || {};
+  const teams = item?.teams || {};
+  const league = item?.league || {};
+  const kickoff = f?.date || new Date().toISOString();
+  if (!f?.id) return null;
+  const short = f?.status?.short || "";
+  return {
+    id: `af_${f.id}`,
+    home: teams?.home?.name || "Home",
+    away: teams?.away?.name || "Away",
+    league: String(league?.id || "api-football"),
+    leagueName: league?.name || "Football",
+    leagueFlag: league?.country || "⚽",
+    country: league?.country || "",
+    kickoff,
+    minsToKO: Math.round((new Date(kickoff).getTime() - Date.now()) / 60000),
+    isLive: AF_LIVE_SHORT.has(short),
+    isToday: new Date(kickoff).toDateString() === new Date().toDateString(),
+    isTomorrow:
+      new Date(kickoff).toDateString() === new Date(Date.now() + 86400000).toDateString(),
+    odds: { home: 0, draw: 0, away: 0, over25: 0, under25: 0 },
+    bks: { home: "", draw: "", away: "", over: "", under: "" },
+    probs: null,
+    xg: null,
+    modelReady: false,
+    source: "api-football",
   };
+}
+
+async function parseApiFootballResponse(resp) {
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  if (data?.errors && Object.keys(data.errors).length) return [];
+  if (!Array.isArray(data?.response)) return [];
+  return data.response.map(mapApiFootballFixtureItem).filter(Boolean);
+}
+
+/**
+ * API-Football: free tier rejects `from`/`to` without extra params; `date=YYYY-MM-DD` works.
+ * We fetch each day in the window plus `live=all`, then merge by fixture id.
+ */
+async function getApiFootballFixtures() {
+  if (!API_FOOTBALL_KEY) return [];
+  const days = Math.min(14, Math.max(1, Number.parseInt(process.env.FIXTURES_DAYS || "7", 10)));
+  const maxRows = Number.parseInt(process.env.MAX_AF_FIXTURES || "800", 10);
+  const headers = { "x-apisports-key": API_FOOTBALL_KEY };
+  const opts = { headers, signal: AbortSignal.timeout(15000) };
+  try {
+    const dates = [];
+    for (let i = 0; i < days; i++) {
+      dates.push(new Date(Date.now() + i * 86400000).toISOString().slice(0, 10));
+    }
+    const dateUrls = dates.map((d) => `https://v3.football.api-sports.io/fixtures?date=${d}`);
+    const liveUrl = "https://v3.football.api-sports.io/fixtures?live=all";
+    const allResps = await Promise.all([...dateUrls.map((u) => fetch(u, opts)), fetch(liveUrl, opts)]);
+    const byId = new Map();
+    for (const resp of allResps) {
+      const rows = await parseApiFootballResponse(resp);
+      for (const r of rows) {
+        if (!byId.has(r.id)) byId.set(r.id, r);
+        else if (r.isLive) byId.set(r.id, r);
+      }
+    }
+    const merged = [...byId.values()];
+    return takeRelevantMatchesFirst(merged, Math.max(50, maxRows));
+  } catch {
+    return [];
+  }
+}
+
+/** Prefer live + upcoming (soonest first), then recent past — not the oldest 800 globally. */
+function takeRelevantMatchesFirst(matches, maxRows) {
+  const now = Date.now();
+  const liveCut = now - 3 * 3600000;
+  const upcoming = [];
+  const older = [];
+  for (const m of matches) {
+    const t = new Date(m.kickoff).getTime();
+    if (t >= liveCut) upcoming.push(m);
+    else older.push(m);
+  }
+  upcoming.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+  older.sort((a, b) => new Date(b.kickoff) - new Date(a.kickoff));
+  const merged = [...upcoming, ...older];
+  return merged.slice(0, maxRows);
+}
+
+exports.handler = async (event) => {
+  const headers = jsonHeaders({ "Cache-Control": "no-cache, max-age=0" });
 
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers, body: "" };
   }
 
+  const publicMode = event?.queryStringParameters?.public === "1";
+  const rl = rateLimit(event, "matches", publicMode ? 240 : 120, 60000);
+  if (!rl.allowed) {
+    return { statusCode: 429, headers, body: JSON.stringify({ ok: false, error: "Rate limit exceeded." }) };
+  }
+
+  if (!publicMode) {
+    const auth = await requireAuth(event);
+    if (!auth.ok) return auth.response;
+  }
+
+  const nowMs = Date.now();
+  if (cachedResponse && nowMs - cachedAt < 300000) {
+    console.log(JSON.stringify({ level: "info", event: "matches_cache_hit", ageMs: nowMs - cachedAt }));
+    return { statusCode: 200, headers, body: JSON.stringify(cachedResponse) };
+  }
+
   if (!ODDS_API_KEY) {
-    // Return demo data so the UI works without a key
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({ demo: true, matches: getDemoMatches(), updated: new Date().toISOString(), leagues: TOP_LEAGUES }),
-    };
+    // Prefer real fixtures if football-data key is available.
+    const rows = await getAllScoreboardRows().catch(() => []);
+    if (rows.length) {
+      const fx = fixtureRowsToMatches(rows);
+      const payload = {
+        dataMode: "fixtures",
+        matches: fx,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(fx.map((m) => m.league)).size,
+        note:
+          "Schedules from football-data only (no % / xG shown). Set ODDS_API_KEY to enable Poisson, xG, edges, and value picks from real prices.",
+        stale: false,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
+    const af = await getApiFootballFixtures();
+    if (af.length) {
+      const payload = {
+        dataMode: "fixtures",
+        matches: af,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(af.map((m) => m.league)).size,
+        note:
+          "Schedules from API-Football only (no % / xG / picks — not computed without market odds). Set ODDS_API_KEY with quota so The Odds API can supply prices; then Poisson, xG, and edges are calculated from those prices.",
+        stale: false,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
+    const empty = buildEmptyMatches(
+      "No fixture data: set FOOTBALL_DATA_KEY (football-data.org) and/or a valid API_FOOTBALL_KEY, or ODDS_API_KEY for priced events."
+    );
+    cachedResponse = empty;
+    cachedAt = Date.now();
+    return { statusCode: 200, headers, body: JSON.stringify(empty) };
   }
 
   // Fetch all leagues in parallel (faster than sequential)
@@ -191,69 +422,63 @@ exports.handler = async (event) => {
   });
 
   if (allMatches.length === 0) {
-    // If quota is exhausted or provider has no rows, keep the UI useful with demo fixtures.
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        demo: true,
-        matches: getDemoMatches(),
+    console.warn(JSON.stringify({ level: "warn", event: "matches_empty_provider", fixtureFallback: true }));
+    // If quota is exhausted/provider fails, fallback to real fixtures from football-data.
+    const rows = await getAllScoreboardRows().catch(() => []);
+    if (rows.length) {
+      const fx = fixtureRowsToMatches(rows);
+      const payload = {
+        dataMode: "fixtures",
+        matches: fx,
         updated: new Date().toISOString(),
         leagues: TOP_LEAGUES,
-        totalLeagues: TOP_LEAGUES.length,
-        note: "Live odds temporarily unavailable (quota/provider). Showing demo fixtures.",
-      }),
-    };
+        totalLeagues: new Set(fx.map((m) => m.league)).size,
+        note:
+          "The Odds API returned no priced events. Showing schedules from football-data only. xG, probabilities, and value picks are hidden until the odds API returns 1X2 and totals. Check API key, quota, and that soccer markets are offered.",
+        stale: true,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
+    const af = await getApiFootballFixtures();
+    if (af.length) {
+      const payload = {
+        dataMode: "fixtures",
+        matches: af,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(af.map((m) => m.league)).size,
+        note:
+          "The Odds API returned no priced events. Fixture list from API-Football. Poisson, xG, and picks require real book prices — we do not show placeholder probabilities.",
+        stale: true,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
+    const empty = buildEmptyMatches(
+      "No matches from odds API and no fixture fallbacks (check ODDS_API_KEY quota, FOOTBALL_DATA_KEY, and API_FOOTBALL_KEY)."
+    );
+    cachedResponse = empty;
+    cachedAt = Date.now();
+    return { statusCode: 200, headers, body: JSON.stringify(empty) };
   }
 
+  const payload = {
+    dataMode: "odds",
+    matches: allMatches,
+    updated: new Date().toISOString(),
+    leagues: TOP_LEAGUES,
+    totalLeagues: new Set(allMatches.map(m => m.league)).size,
+    stale: false,
+  };
+  cachedResponse = payload;
+  cachedAt = Date.now();
+  console.log(JSON.stringify({ level: "info", event: "matches_ready", total: payload.matches.length, leagues: payload.totalLeagues }));
   return {
     statusCode: 200,
     headers,
-    body: JSON.stringify({
-      demo: false,
-      matches: allMatches,
-      updated: new Date().toISOString(),
-      leagues: TOP_LEAGUES,
-      totalLeagues: new Set(allMatches.map(m => m.league)).size,
-    }),
+    body: JSON.stringify(payload),
   };
 };
-
-function getDemoMatches() {
-  const now = new Date();
-  const demos = [
-    { home: "Manchester City", away: "Arsenal",    hO: 2.05, dO: 3.40, aO: 3.80, lg: "soccer_epl",                    offset: 90 },
-    { home: "Real Madrid",     away: "Barcelona",  hO: 2.30, dO: 3.20, aO: 3.10, lg: "soccer_spain_la_liga",          offset: 180 },
-    { home: "Bayern Munich",   away: "Dortmund",   hO: 1.55, dO: 3.80, aO: 6.50, lg: "soccer_germany_bundesliga",     offset: 270 },
-    { home: "PSG",             away: "Lyon",        hO: 1.55, dO: 3.80, aO: 5.50, lg: "soccer_france_ligue_one",       offset: -30 },
-    { home: "Inter Milan",     away: "Juventus",   hO: 1.90, dO: 3.40, aO: 4.20, lg: "soccer_italy_serie_a",          offset: 360 },
-    { home: "Ajax",            away: "PSV",         hO: 2.10, dO: 3.20, aO: 3.60, lg: "soccer_netherlands_eredivisie", offset: 420 },
-    { home: "Porto",           away: "Benfica",     hO: 2.50, dO: 3.10, aO: 2.90, lg: "soccer_portugal_primeira_liga", offset: 510 },
-    { home: "Flamengo",        away: "Palmeiras",  hO: 2.20, dO: 3.20, aO: 3.30, lg: "soccer_brazil_campeonato",      offset: 600 },
-    { home: "River Plate",     away: "Boca Juniors",hO:2.10, dO: 3.10, aO: 3.50, lg: "soccer_argentina_primera_division", offset: 690 },
-    { home: "Man United",      away: "Liverpool",  hO: 3.20, dO: 3.10, aO: 2.30, lg: "soccer_epl",                    offset: 780 },
-  ];
-
-  return demos.map((d, i) => {
-    const ko = new Date(now.getTime() + d.offset * 60000);
-    const minsToKO = d.offset;
-    const lg = TOP_LEAGUES.find(l => l.key === d.lg);
-    const probs = removVig(d.hO, d.dO, d.aO);
-    const { xgH, xgA } = estimateXG(probs.H, probs.A);
-    return {
-      id: `demo_${i}`,
-      home: d.home, away: d.away,
-      league: d.lg, leagueName: lg?.name, leagueFlag: lg?.flag, country: lg?.country,
-      kickoff: ko.toISOString(), minsToKO,
-      isLive: minsToKO < 0 && minsToKO > -110,
-      isToday: true, isTomorrow: false,
-      odds: { home: d.hO, draw: d.dO, away: d.aO, over25: 1.85, under25: 1.95 },
-      bks: { home: "Demo", draw: "Demo", away: "Demo", over: "Demo", under: "Demo" },
-      probs: { H: probs.H, D: probs.D, A: probs.A, O25: over25Prob(xgH, xgA), U25: 100 - over25Prob(xgH, xgA) },
-      xg: { home: xgH, away: xgA },
-      edge: { H: 2.1, D: 1.5, A: 1.8 },
-      valueH: false, valueD: false, valueA: false, valueO25: false,
-      kellyH: kelly(probs.H/100, d.hO), kellyA: kelly(probs.A/100, d.aO),
-    };
-  });
-}

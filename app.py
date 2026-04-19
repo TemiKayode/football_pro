@@ -44,21 +44,6 @@ def _kelly(prob,odds):
     k=(b*prob-(1-prob))/b
     return round(max(0,BANKROLL*k*KELLY_FRAC),2)
 
-def _demo():
-    s=[("Man City","Arsenal",2.05,3.40,3.80,"soccer_epl","Premier League"),
-       ("PSG","Lyon",1.55,3.80,5.50,"soccer_france_ligue_one","Ligue 1"),
-       ("Bayern Munich","Stuttgart",1.45,4.20,7.00,"soccer_germany_bundesliga","Bundesliga"),
-       ("Barcelona","Real Betis",1.35,4.80,8.50,"soccer_spain_la_liga","La Liga"),
-       ("Juventus","Bologna",1.80,3.40,4.80,"soccer_italy_serie_a","Serie A"),
-       ("Ajax","PSV",2.05,3.30,3.60,"soccer_netherlands_eredivisie","Eredivisie"),
-       ("Napoli","Fiorentina",1.90,3.40,4.20,"soccer_italy_serie_a","Serie A"),
-       ("Dortmund","Hoffenheim",1.70,3.60,5.20,"soccer_germany_bundesliga","Bundesliga")]
-    return [{"home_team":h,"away_team":a,"league":lg,"league_name":ln,
-             "commence_time":datetime.now(timezone.utc).isoformat(),
-             "bookmakers":[{"name":"Demo","home":ho,"draw":do,"away":ao}],
-             "totals":[{"name":"Demo","over25":1.85,"under25":1.95}]}
-            for h,a,ho,do,ao,lg,ln in s]
-
 def run_pipeline(push=None):
     def p(msg,lvl="info"):
         log.info(msg)
@@ -79,8 +64,8 @@ def run_pipeline(push=None):
             STATE["credits"]=cr
             p(f"  {len(matches)} matches — {cr} credits remaining")
         else:
-            p("  No ODDS_API_KEY — demo mode","warn")
-            matches = _demo()
+            p("  No ODDS_API_KEY — set it for real-time odds; skipping run.","warn")
+            matches = []
 
         if not matches:
             p("  No matches — check quota","warn")

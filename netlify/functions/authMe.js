@@ -1,8 +1,9 @@
-const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
+const { jsonHeaders, requireAuth, rateLimit } = require("./_lib/auth");
+
 exports.handler = async (event) => {
-  const headers = jsonHeaders();
+  const headers = jsonHeaders({ "Cache-Control": "no-store" });
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
-  const rl = rateLimit(event, "clvUpdate", 40, 60000);
+  const rl = rateLimit(event, "authMe", 120, 60000);
   if (!rl.allowed) return { statusCode: 429, headers, body: JSON.stringify({ ok: false, error: "Rate limit exceeded." }) };
   const auth = await requireAuth(event);
   if (!auth.ok) return auth.response;
@@ -10,8 +11,11 @@ exports.handler = async (event) => {
     statusCode: 200,
     headers,
     body: JSON.stringify({
-      ok: false,
-      error: "CLV updates run only in the local app (file-backed bets.json).",
+      ok: true,
+      user: {
+        id: auth.user.id,
+        email: auth.user.email,
+      },
     }),
   };
 };

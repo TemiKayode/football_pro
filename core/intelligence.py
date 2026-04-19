@@ -587,14 +587,15 @@ def full_prediction(
         pin_d = market_consensus.get("D", poisson["D"]) if market_consensus else poisson["D"]
         pin_a = market_consensus.get("A", poisson["A"]) if market_consensus else poisson["A"]
 
-    # Blend: 35% market + 45% poisson + 20% form differential
+    # Blend: 45% market + 35% poisson + 20% form differential
     form_diff = home_form["form_dual"] - away_form["form_dual"]
     form_h_adj = max(0.05, min(0.90, 0.33 + form_diff * 0.4))
     form_a_adj = max(0.05, min(0.90, 0.33 - form_diff * 0.4))
+    form_d_adj = max(0.10, min(0.50, 1.0 - form_h_adj - form_a_adj))
 
-    blended_h = round(0.35 * pin_h + 0.45 * poisson["H"] + 0.20 * form_h_adj, 4)
-    blended_d = round(0.35 * pin_d + 0.45 * poisson["D"] + 0.10 * 0.26, 4)
-    blended_a = round(0.35 * pin_a + 0.45 * poisson["A"] + 0.20 * form_a_adj, 4)
+    blended_h = round(0.45 * pin_h + 0.35 * poisson["H"] + 0.20 * form_h_adj, 4)
+    blended_d = round(0.45 * pin_d + 0.35 * poisson["D"] + 0.20 * form_d_adj, 4)
+    blended_a = round(0.45 * pin_a + 0.35 * poisson["A"] + 0.20 * form_a_adj, 4)
 
     # Normalize
     total = blended_h + blended_d + blended_a
@@ -606,13 +607,13 @@ def full_prediction(
     # ── Apply Layer 3 modifiers ─────────────────────────────────────────────
     # Manager change is the strongest signal
     if "MANAGER_CHANGE_14D" in home_ctx["flags"]:
-        blended_h = max(0.05, blended_h - 0.25)
-        blended_d = min(0.50, blended_d + 0.12)
-        blended_a = min(0.85, blended_a + 0.13)
+        blended_h = max(0.05, blended_h - 0.10)
+        blended_d = min(0.50, blended_d + 0.05)
+        blended_a = min(0.85, blended_a + 0.05)
     if "MANAGER_CHANGE_14D" in away_ctx["flags"]:
-        blended_a = max(0.05, blended_a - 0.25)
-        blended_h = min(0.85, blended_h + 0.13)
-        blended_d = min(0.50, blended_d + 0.12)
+        blended_a = max(0.05, blended_a - 0.10)
+        blended_h = min(0.85, blended_h + 0.05)
+        blended_d = min(0.50, blended_d + 0.05)
 
     # Relegation survival uplift
     if "RELEGATION_ZONE" in home_ctx["flags"]:

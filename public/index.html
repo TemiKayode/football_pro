@@ -140,12 +140,34 @@ input[type=number]{width:90px}
 .burger span{display:block;width:20px;height:2px;background:var(--t);border-radius:1px}
 .ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99}
 .ov.open{display:block}
+.auth-overlay{position:fixed;inset:0;background:rgba(8,10,14,.92);backdrop-filter:blur(3px);z-index:500;display:none;align-items:center;justify-content:center;padding:16px}
+.auth-card{max-width:560px;width:100%;background:var(--bg2);border:1px solid var(--b2);border-radius:16px;padding:22px}
+.auth-card h1{font-size:26px;margin-bottom:8px}
+.auth-meta{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 14px}
+.auth-help{font-size:12px;color:var(--t2);line-height:1.6}
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:var(--bg)}
 ::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:2px}
 </style>
 </head>
 <body>
+<div id="auth-overlay" class="auth-overlay">
+  <div class="auth-card">
+    <h1>Football Pro</h1>
+    <p style="color:var(--t2)">Invite-only platform. Sign in to access live matches, picks, and accumulators.</p>
+    <div class="auth-meta">
+      <span class="badge b-b" id="pub-matches">Matches: —</span>
+      <span class="badge b-g" id="pub-picks">Picks: —</span>
+      <span class="badge b-x" id="pub-upd">Updated: —</span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 10px">
+      <button class="btn" id="btn-login">Sign in</button>
+      <button class="btn" id="btn-signup">Use invite token</button>
+    </div>
+    <div id="auth-status" class="auth-help" style="margin-bottom:8px"></div>
+    <p class="auth-help">Need access? Ask support for an invite. This dashboard is intentionally restricted for customer safety, quota control, and model integrity.</p>
+  </div>
+</div>
 <div class="burger" id="burger" onclick="toggleSB()"><span></span><span></span><span></span></div>
 <div class="ov" id="ov" onclick="toggleSB()"></div>
 <div class="app">
@@ -233,7 +255,7 @@ input[type=number]{width:90px}
 
 <!-- MATCHES -->
 <div class="pg" id="pg-matches">
-  <div class="pg-h"><div><h2>All Matches</h2><p>Poisson probabilities, xG, best odds</p></div></div>
+  <div class="pg-h"><div><h2>All Matches</h2><p id="m-sub">1X2, xG, and edges are computed from bookmaker prices. Without prices, the table shows kick-off times and leagues only.</p></div></div>
   <div class="filters">
     <input type="text" id="mq" placeholder="Search team..." oninput="renderMatches()">
     <select id="mlg" onchange="renderMatches()">
@@ -379,23 +401,51 @@ input[type=number]{width:90px}
 </main>
 </div>
 
+<script src="https://identity.netlify.com/v1/netlify-identity-widget.js"></script>
 <script>
 /* Use same-origin on Netlify/production so the browser never asks to access your device / localhost. */
 const IS_LOCAL_API=typeof location!=='undefined'&&(location.hostname==='localhost'||location.hostname==='127.0.0.1');
 const API=IS_LOCAL_API?'http://localhost:5000':'';
 const S={matches:[],picks:[],accas:{},live:[],running:false,meta:{}};
+let AUTH_TOKEN=localStorage.getItem('fp_token')||'';
 
 function normalizeMatchRow(m){
-  if(m&&m.best_home_odds!=null)return m;
-  if(!m||!m.odds)return m;
-  return{
-    home:m.home,away:m.away,league:m.league,
-    time:m.kickoff||m.time,
-    pH:m.probs?.H,pD:m.probs?.D,pA:m.probs?.A,pO25:m.probs?.O25,
-    xg_home:m.xg?.home??m.xg_home,xg_away:m.xg?.away??m.xg_away,
-    best_home_odds:m.odds.home,best_draw_odds:m.odds.draw,best_away_odds:m.odds.away,
-    best_home_bk:m.bks?.home,best_draw_bk:m.bks?.draw,best_away_bk:m.bks?.away
+  if(!m) return m;
+  const t=m.time||m.kickoff;
+  const hasPriced=!!(m.odds && m.odds.home>0.01);
+  const modelReady=hasPriced && m.probs!=null && typeof m.probs.H==='number' && m.xg && m.xg.home!=null && m.xg.away!=null;
+  return {
+    home:m.home, away:m.away, league:m.league, leagueName:m.leagueName, country:m.country,
+    time:t, modelReady,
+    pH: modelReady? m.probs.H : null, pD: modelReady? m.probs.D : null, pA: modelReady? m.probs.A : null, pO25: modelReady? m.probs.O25 : null,
+    xg_home: modelReady? m.xg.home: null, xg_away: modelReady? m.xg.away: null,
+    best_home_odds: hasPriced? m.odds.home: null, best_draw_odds: (hasPriced && m.odds.draw>0)? m.odds.draw: null, best_away_odds: hasPriced? m.odds.away: null,
+    best_home_bk:m.bks?.home, best_draw_bk:m.bks?.draw, best_away_bk:m.bks?.away
   };
+}
+function colDashCell(title){
+  return `<span class="nd" style="font-size:11px" title="${title||'No data'}">—</span>`;
+}
+function xgTableCell(m){
+  if(!m.modelReady) return colDashCell('xG and probabilities need bookmaker odds from the feed');
+  if(m.xg_home==null||m.xg_away==null) return colDashCell();
+  return `<span style="font-size:12px"><span style="color:var(--green)">${m.xg_home.toFixed(2)}</span>–<span style="color:var(--red)">${m.xg_away.toFixed(2)}</span></span>`;
+}
+function probTableCell(m){
+  if(!m.modelReady) return colDashCell();
+  if(m.pH==null) return colDashCell();
+  return `<div class="pb-r"><span class="pc pc-h">${m.pH}%</span><span class="pc pc-d">${m.pD}%</span><span class="pc pc-a">${m.pA}%</span></div>`;
+}
+function o25TableCell(m){
+  if(!m.modelReady) return colDashCell();
+  if(m.pO25==null) return colDashCell();
+  return `<span class="pc pc-o">${m.pO25}%</span>`;
+}
+function oddsOrDash(m, side, bk){
+  const o=side==='h'?m.best_home_odds:side==='d'?m.best_draw_odds:m.best_away_odds;
+  const b=side==='h'?m.best_home_bk:side==='d'?m.best_draw_bk:m.best_away_bk;
+  if(m.modelReady && o) return o.toFixed(2)+' <small style="color:var(--t3)">'+(b||'')+'</small>';
+  return '—';
 }
 function normalizePick(p){
   if(p&&p.model_prob!=null&&p.market_label!=null&&p.market&&String(p.market).length<=3)return p;
@@ -444,11 +494,18 @@ function lp(lg){
 function ft(iso){if(!iso)return '—';const d=new Date(iso);return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}
 async function parseApiBody(r){
   const t=await r.text();
+  if(r.status===401){
+    showAuthOverlay();
+    throw new Error('Session expired. Please sign in again.');
+  }
   if(!t||t.trimStart().startsWith('<'))throw new Error('Server returned HTML instead of JSON (missing API route).');
   try{return JSON.parse(t);}catch(e){throw new Error('Invalid JSON from server');}
 }
-async function get(p){const r=await fetch(API+p);return parseApiBody(r);}
-async function post(p,b={}){const r=await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return parseApiBody(r);}
+function authHeaders(extra={}){
+  return AUTH_TOKEN?{...extra,Authorization:`Bearer ${AUTH_TOKEN}`}:{...extra};
+}
+async function get(p){const r=await fetch(API+p,{headers:authHeaders()});return parseApiBody(r);}
+async function post(p,b={}){const r=await fetch(API+p,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(b)});return parseApiBody(r);}
 
 function nav(el){
   document.querySelectorAll('.pg').forEach(p=>p.classList.remove('on'));
@@ -481,7 +538,7 @@ async function loadAll(){
   S.picks=(pk.picks||[]).map(normalizePick);
   S.accas=ac.accumulators||{};
   S.live=lv.live||[];
-  S.meta={updated:m.updated,demo:!!m.demo,note:m.note||'',credits:(m.credits??null)};
+  S.meta={updated:m.updated,note:m.note||'',stale:!!m.stale,dataMode:m.dataMode||'',credits:(m.credits??null)};
   document.getElementById('dm-m').textContent=S.matches.length;
   document.getElementById('dm-p').textContent=S.picks.length;
   document.getElementById('dm-l').textContent=S.live.length;
@@ -498,13 +555,20 @@ async function loadAll(){
   }
   const note=document.getElementById('m-note');
   if(note){
-    if(S.meta.note||S.meta.demo){
+    if(S.meta.note){
       note.style.display='block';
-      note.textContent=S.meta.note||(S.meta.demo?'Demo fixtures shown while live provider is unavailable.':'');
+      note.textContent=S.meta.note;
     }else{
       note.style.display='none';
       note.textContent='';
     }
+  }
+  const hasModel=S.matches.some(x=>x.modelReady);
+  const subEl=document.getElementById('m-sub');
+  if(subEl){
+    subEl.textContent=hasModel
+      ?'Percentages, xG, and over 2.5% come from a Poisson layer applied after removing vig on the best 1X2 and totals. Value picks are edges vs implied odds, not random.'
+      :'This response has no bookmaker 1X2 (odds) — only fixture times and names. The model is not run so we do not show fake % or xG. Connect The Odds API to enable full analysis.';
   }
   renderMatches(); renderPicks(); renderAccas(); renderLive(); renderUpcoming(); renderTopPicks();
 }
@@ -521,10 +585,17 @@ function renderUpcoming(){
   const tbody=document.querySelector('#upcoming-tbl tbody');
   const pickMap={};
   S.picks.forEach(p=>{const k=p.home+'|'+p.away;if(!pickMap[k]||p.edge>pickMap[k].edge)pickMap[k]=p;});
-  const today=new Date().toDateString();
-  const ms=S.matches.filter(m=>{if(!m.time)return true;return new Date(m.time).toDateString()===today;}).slice(0,15);
+  const n=new Date();
+  const sToday=new Date(n.getFullYear(),n.getMonth(),n.getDate());
+  const sTom=new Date(sToday.getTime()+86400000);
+  const ms=S.matches.filter(m=>{
+    const iso=m.time||m.kickoff;
+    if(!iso)return false;
+    const t=new Date(iso);
+    return t>=sToday&&t<sTom;
+  }).slice(0,15);
   if(!ms.length){tbody.innerHTML='<tr><td colspan="6" class="nd">No matches today</td></tr>';return;}
-  tbody.innerHTML=ms.map(m=>{const pk=pickMap[m.home+'|'+m.away];return `<tr><td><strong>${m.home}</strong> <span style="color:var(--t3)">vs</span> <strong>${m.away}</strong></td><td>${lp(m.league)}</td><td style="font-size:11px;color:var(--t2)">${ft(m.time)}</td><td><div class="pb-r"><span class="pc pc-h">${m.pH}%</span><span class="pc pc-d">${m.pD}%</span><span class="pc pc-a">${m.pA}%</span></div></td><td style="font-size:12px;color:var(--green)">${m.xg_home?.toFixed(2)}–${m.xg_away?.toFixed(2)}</td><td>${pk?`<span class="badge b-b">${pk.market_label} @${pk.odds} <strong style="color:var(--green)">${pk.confidence}%</strong></span>`:'<span style="color:var(--t3)">—</span>'}</td></tr>`;}).join('');
+  tbody.innerHTML=ms.map(m=>{const pk=pickMap[m.home+'|'+m.away];return `<tr><td><strong>${m.home}</strong> <span style="color:var(--t3)">vs</span> <strong>${m.away}</strong></td><td>${lp(m.league)}</td><td style="font-size:11px;color:var(--t2)">${ft(m.time)}</td><td>${probTableCell(m)}</td><td style="font-size:12px">${m.modelReady&&m.xg_home!=null?`<span style="color:var(--green)">${m.xg_home.toFixed(2)}</span>–<span style="color:var(--red)">${m.xg_away.toFixed(2)}</span>`:colDashCell()}</td><td>${pk?`<span class="badge b-b">${pk.market_label} @${pk.odds} <strong style="color:var(--green)">${pk.confidence}%</strong></span>`:'<span style="color:var(--t3)">—</span>'}</td></tr>`;}).join('');
 }
 
 function renderMatches(){
@@ -535,23 +606,28 @@ function renderMatches(){
   const tomorrow=new Date(now.getTime()+86400000);
   const next7=new Date(now.getTime()+7*86400000);
   let d=S.matches.filter(m=>(!lg||m.league===lg)&&(!q||m.home.toLowerCase().includes(q)||m.away.toLowerCase().includes(q)));
+  const startOfToday=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const startOfTomorrow=new Date(startOfToday.getTime()+86400000);
+  const endOfNext7=new Date(startOfToday.getTime()+7*86400000);
   d=d.filter(m=>{
     if(dateMode==='all') return true;
-    if(!m.time) return false;
-    const t=new Date(m.time);
-    if(dateMode==='today') return t.toDateString()===now.toDateString();
-    if(dateMode==='tomorrow') return t.toDateString()===tomorrow.toDateString();
-    if(dateMode==='next7') return t>=now&&t<=next7;
+    const iso=m.time||m.kickoff;
+    if(!iso) return false;
+    const t=new Date(iso);
+    if(Number.isNaN(t.getTime())) return false;
+    if(dateMode==='today') return t>=startOfToday&&t<startOfTomorrow;
+    if(dateMode==='tomorrow') return t>=startOfTomorrow&&t<new Date(startOfTomorrow.getTime()+86400000);
+    if(dateMode==='next7') return t>=startOfToday&&t<endOfNext7;
     return true;
   });
   document.getElementById('m-ct').textContent=d.length+' matches';
   const tb=document.querySelector('#mtbl tbody');
   if(!d.length){
-    const why=S.meta?.demo?'No live fixtures from provider; demo mode is active.':'No matches available for this filter.';
+    const why=S.matches.length===0&&S.meta?.note?S.meta.note:'No matches available for this filter.';
     tb.innerHTML=`<tr><td colspan="9" class="nd">${why}</td></tr>`;
     return;
   }
-  tb.innerHTML=d.map(m=>`<tr><td><strong>${m.home}</strong> <span style="color:var(--t3)">vs</span> <strong>${m.away}</strong></td><td>${lp(m.league)}</td><td style="font-size:11px;color:var(--t2)">${ft(m.time)}</td><td style="font-size:12px"><span style="color:var(--green)">${m.xg_home?.toFixed(2)}</span>–<span style="color:var(--red)">${m.xg_away?.toFixed(2)}</span></td><td><div class="pb-r"><span class="pc pc-h">${m.pH}%</span><span class="pc pc-d">${m.pD}%</span><span class="pc pc-a">${m.pA}%</span></div></td><td><span class="pc pc-o">${m.pO25}%</span></td><td>${m.best_home_odds?m.best_home_odds.toFixed(2)+' <small style="color:var(--t3)">'+m.best_home_bk+'</small>':'—'}</td><td>${m.best_draw_odds?m.best_draw_odds.toFixed(2)+' <small style="color:var(--t3)">'+m.best_draw_bk+'</small>':'—'}</td><td>${m.best_away_odds?m.best_away_odds.toFixed(2)+' <small style="color:var(--t3)">'+m.best_away_bk+'</small>':'—'}</td></tr>`).join('');
+  tb.innerHTML=d.map(m=>`<tr><td><strong>${m.home}</strong> <span style="color:var(--t3)">vs</span> <strong>${m.away}</strong></td><td>${lp(m.league)}</td><td style="font-size:11px;color:var(--t2)">${ft(m.time)}</td><td>${xgTableCell(m)}</td><td>${probTableCell(m)}</td><td>${o25TableCell(m)}</td><td>${oddsOrDash(m,'h')}</td><td>${oddsOrDash(m,'d')}</td><td>${oddsOrDash(m,'a')}</td></tr>`).join('');
 }
 
 function renderPicks(){
@@ -561,7 +637,14 @@ function renderPicks(){
   let d=S.picks.filter(p=>(!mkt||p.market===mkt)&&(!lg||p.league===lg)&&p.confidence>=mc);
   document.getElementById('p-ct').textContent=d.length+' picks';
   const tb=document.querySelector('#ptbl tbody');
-  if(!d.length){tb.innerHTML='<tr><td colspan="12" class="nd">No picks match filter</td></tr>';return;}
+  if(!d.length){
+    const hasModel=S.matches.some(x=>x.modelReady);
+    let msg='No picks match this filter';
+    if(S.picks.length===0 && !hasModel) msg='No value picks: edges need real 1X2 and totals. This run is fixture-only (no odds) — the model is not run and nothing is “randomly” selected.';
+    else if(S.picks.length===0 && hasModel) msg='No edges above current MIN_EDGE / confidence from this data pull.';
+    tb.innerHTML=`<tr><td colspan="12" class="nd">${msg}</td></tr>`;
+    return;
+  }
   tb.innerHTML=d.map((p,i)=>{
     const ew=Math.min(p.edge*2.2,36);
     const confColor=p.confidence>=75?'var(--green)':p.confidence>=65?'var(--amber)':'var(--red)';
@@ -603,7 +686,12 @@ function renderAccas(){
   const con=document.getElementById('accas-con');
   const folds=Object.entries(S.accas);
   if(S.picks.length<3){
-    con.innerHTML='<div class="card"><p class="nd">Need at least 3 value picks across different fixtures to build accumulators.</p></div>';
+    const noOdds=!S.matches.some(x=>x.modelReady);
+    con.innerHTML='<div class="card"><p class="nd">'+
+      (noOdds
+        ?'Accumulators are built from value picks (priced markets only). There are no edges until The Odds API provides 1X2/totals.'
+        :'Need at least 3 value picks (different matches) to build accas.')
+    +'</p></div>';
     return;
   }
   if(!folds.length){con.innerHTML='<div class="card"><p class="nd">Run pipeline to build accumulators</p></div>';return;}
@@ -828,18 +916,117 @@ async function runTrain(){
   log_el.lastChild.textContent=msg;
 }
 
+function showAuthOverlay(){
+  const ov=document.getElementById('auth-overlay');
+  if(ov) ov.style.display='flex';
+}
+function hideAuthOverlay(){
+  const ov=document.getElementById('auth-overlay');
+  if(ov) ov.style.display='none';
+}
+async function loadPublicSummary(){
+  try{
+    const r=await fetch('/api/public/summary');
+    const d=await r.json();
+    document.getElementById('pub-matches').textContent=`Matches: ${d.totals?.matches??0}`;
+    document.getElementById('pub-picks').textContent=`Picks: ${d.totals?.picks??0}`;
+    if(d.updated) document.getElementById('pub-upd').textContent=`Updated: ${new Date(d.updated).toLocaleTimeString()}`;
+  }catch{}
+}
+function bindIdentity(){
+  const statusEl=document.getElementById('auth-status');
+  const setStatus=(msg)=>{ if(statusEl) statusEl.textContent=msg||''; };
+  if(!window.netlifyIdentity){
+    setStatus('');
+    return;
+  }
+  const ni=window.netlifyIdentity;
+  setStatus('');
+  const tryRestore=()=>{
+    const u=ni.currentUser&&ni.currentUser();
+    const token=u?.token?.access_token||'';
+    if(token){
+      AUTH_TOKEN=token;
+      localStorage.setItem('fp_token',AUTH_TOKEN);
+      hideAuthOverlay();
+      loadAll(); loadCLV(); loadConfig(); calcK();
+      setStatus('');
+      return true;
+    }
+    return false;
+  };
+  ni.on('init',()=>{ tryRestore(); });
+  ni.on('login', user=>{
+    AUTH_TOKEN=user?.token?.access_token||'';
+    localStorage.setItem('fp_token',AUTH_TOKEN);
+    hideAuthOverlay();
+    loadAll(); loadCLV(); loadConfig(); calcK();
+    ni.close();
+  });
+  ni.on('logout',()=>{
+    AUTH_TOKEN='';
+    localStorage.removeItem('fp_token');
+    setStatus('Signed out.');
+  });
+  ni.on('error',()=>setStatus(''));
+  document.getElementById('btn-login')?.addEventListener('click',()=>{
+    setStatus('Opening sign-in...');
+    ni.open('login');
+  });
+  document.getElementById('btn-signup')?.addEventListener('click',()=>{
+    setStatus('Opening invite signup...');
+    ni.open('signup');
+  });
+  try{ ni.init(); }catch{}
+}
+function applyPrefs(){
+  const keys=['mlg','mdate','pmkt','plg','pconf','ac-stake'];
+  keys.forEach(k=>{
+    const el=document.getElementById(k);
+    if(!el) return;
+    const v=localStorage.getItem('fp_pref_'+k);
+    if(v!=null) el.value=v;
+    el.addEventListener('change',()=>localStorage.setItem('fp_pref_'+k,el.value));
+    if(el.tagName==='INPUT') el.addEventListener('input',()=>localStorage.setItem('fp_pref_'+k,el.value));
+  });
+}
+
 setInterval(()=>{
   get('/api/live').then(r=>{S.live=r.live||[];renderLive();document.getElementById('nb-live').textContent=S.live.length;document.getElementById('dm-l').textContent=S.live.length;}).catch(()=>{});
-},60000);
-setInterval(loadAll,5*60*1000);
+},45000);
+let _fpRefresh=null;
+function scheduleRefresh(){
+  if(_fpRefresh) clearInterval(_fpRefresh);
+  _fpRefresh=setInterval(()=>{loadAll().catch(()=>{});},60000);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'){
+    loadAll().catch(()=>{});
+  }
+});
 
 document.addEventListener('DOMContentLoaded',()=>{
+  bindIdentity();
+  applyPrefs();
   if(!IS_LOCAL_API){
     const b=document.getElementById('public-site-banner');
     if(b) b.style.display='block';
     document.querySelectorAll('.local-only-hint').forEach(el=>{el.style.display='inline';});
+    // Commercial customer scope: hide internal/admin panes from customer app.
+    ['clv','audit','setup'].forEach(pg=>{
+      const nav=document.querySelector(`.ni[data-pg="${pg}"]`);
+      const pane=document.getElementById(`pg-${pg}`);
+      if(nav) nav.style.display='none';
+      if(pane) pane.style.display='none';
+    });
+    hideAuthOverlay();
+    loadPublicSummary();
+    loadAll(); loadConfig(); calcK();
+    scheduleRefresh();
+    return;
   }
   loadAll();loadCLV();loadConfig();calcK();
+  scheduleRefresh();
 });
 </script>
 </body>

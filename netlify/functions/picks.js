@@ -3,6 +3,7 @@
 // Calls the matches function internally to avoid duplicate API calls
 
 const { handler: matchesHandler } = require("./matches");
+const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
 
 /* MIN_EDGE = probability edge as fraction (e.g. 0.025 = 2.5 pp vs implied). */
 const MIN_EDGE = parseFloat(process.env.MIN_EDGE || "0.025");
@@ -22,14 +23,26 @@ function poissonPmf(k, lam) {
   return Math.exp(-lam + k * Math.log(lam) - Math.log(fact(k)));
 }
 
-/** Independent Poisson 1X2 from xG lambdas (can disagree with market → real value signals). */
-function poisson1x2(lamH, lamA, maxG = 6) {
+const RHO = -0.13; // Dixon-Coles low-score correlation
+
+function dcFactor(lh, la, i, j) {
+  if (i === 0 && j === 0) return 1 - lh * la * RHO;
+  if (i === 1 && j === 0) return 1 + la * RHO;
+  if (i === 0 && j === 1) return 1 + lh * RHO;
+  if (i === 1 && j === 1) return 1 - RHO;
+  return 1;
+}
+
+/** Dixon-Coles corrected Poisson 1X2 from xG lambdas. */
+function poisson1x2(lamH, lamA, maxG = 8) {
   let pH = 0;
   let pD = 0;
   let pA = 0;
   for (let i = 0; i <= maxG; i++) {
+    const piH = poissonPmf(i, lamH);
     for (let j = 0; j <= maxG; j++) {
-      const p = poissonPmf(i, lamH) * poissonPmf(j, lamA);
+      const dc = i <= 1 && j <= 1 ? dcFactor(lamH, lamA, i, j) : 1;
+      const p = piH * poissonPmf(j, lamA) * dc;
       if (i > j) pH += p;
       else if (i === j) pD += p;
       else pA += p;
@@ -91,14 +104,22 @@ function buildAccumulators(picks, foldSizes = [3, 5, 7]) {
 }
 
 exports.handler = async (event) => {
-  const headers = {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json",
-    "Cache-Control": "no-cache, max-age=0",
-  };
+  const headers = jsonHeaders({ "Cache-Control": "no-cache, max-age=0" });
+  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
+  const publicMode = event?.queryStringParameters?.public === "1";
+  const rl = rateLimit(event, "picks", publicMode ? 240 : 120, 60000);
+  if (!rl.allowed) return { statusCode: 429, headers, body: JSON.stringify({ ok: false, error: "Rate limit exceeded." }) };
+  if (!publicMode) {
+    const auth = await requireAuth(event);
+    if (!auth.ok) return auth.response;
+  }
 
   // Get matches data
-  const matchResp = await matchesHandler({ httpMethod: "GET" });
+  const matchResp = await matchesHandler({
+    httpMethod: "GET",
+    headers: event.headers || {},
+    queryStringParameters: { public: publicMode ? "1" : "0" },
+  });
   const matchData = JSON.parse(matchResp.body);
   const matches = matchData.matches || [];
 
@@ -106,8 +127,11 @@ exports.handler = async (event) => {
   const picks = [];
   for (const m of matches) {
     if (!m.odds) continue;
-    const xgH = m.xg?.home ?? 1.2;
-    const xgA = m.xg?.away ?? 1.0;
+    if (m.probs == null) continue; // fixture-only / no bookmaker data — do not generate synthetic picks
+    if (m.odds.home < 1.01) continue;
+    if (!m.xg || m.xg.home == null || m.xg.away == null) continue;
+    const xgH = m.xg.home;
+    const xgA = m.xg.away;
     const pm = poisson1x2(xgH, xgA);
 
     const push = (market, code, odds, bk, pPct, edgeFrac) => {
@@ -159,6 +183,15 @@ exports.handler = async (event) => {
 
   picks.sort((a, b) => b.score - a.score);
   const accas = buildAccumulators(picks.slice(0, 45), [3, 5, 7]);
+  console.log(
+    JSON.stringify({
+      level: "info",
+      event: "picks_ready",
+      matches: matches.length,
+      picks: picks.length,
+      accas3: (accas["3"] || []).length,
+    })
+  );
 
   return {
     statusCode: 200,
@@ -174,7 +207,7 @@ exports.handler = async (event) => {
         leagueCount: new Set(matches.map(m => m.league)).size,
       },
       updated: new Date().toISOString(),
-      demo: matchData.demo,
+      dataMode: matchData.dataMode || "unknown",
     }),
   };
 };

@@ -1,12 +1,13 @@
-// Mirrors Flask /api/kelly for the public dashboard (no secrets).
+// Mirrors Flask /api/kelly.
+const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
 
 exports.handler = async (event) => {
-  const headers = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "no-store",
-  };
+  const headers = jsonHeaders({ "Cache-Control": "no-store" });
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers, body: "" };
+  const rl = rateLimit(event, "kelly", 180, 60000);
+  if (!rl.allowed) return { statusCode: 429, headers, body: JSON.stringify({ ok: false, error: "Rate limit exceeded." }) };
+  const auth = await requireAuth(event);
+  if (!auth.ok) return auth.response;
 
   const q = event.queryStringParameters || {};
   const prob = parseFloat(q.prob || "0.55");

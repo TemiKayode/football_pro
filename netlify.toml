@@ -58,6 +58,21 @@
   status = 200
 
 [[redirects]]
+  from = "/api/auth/me"
+  to = "/.netlify/functions/authMe"
+  status = 200
+
+[[redirects]]
+  from = "/api/public/summary"
+  to = "/.netlify/functions/publicSummary"
+  status = 200
+
+[[redirects]]
+  from = "/api/health"
+  to = "/.netlify/functions/health"
+  status = 200
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
@@ -70,6 +85,7 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://identity.netlify.com; connect-src 'self' https://identity.netlify.com https://api.the-odds-api.com https://api.football-data.org; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors 'none';"
 
 # Cache: static assets long, API never
 [[headers]]
