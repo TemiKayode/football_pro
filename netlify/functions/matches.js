@@ -203,11 +203,16 @@ function applyAfOdds(fixtures, oddsMap) {
 function extractOpOdds(bookmakerOdds) {
   let bestH = 0, bestD = 0, bestA = 0;
   for (const bk of Object.values(bookmakerOdds || {})) {
-    const mkt = (bk.markets || {})["101"] || Object.values(bk.markets || {})[0];
-    if (!mkt?.outcomes) continue;
-    const h = parseFloat(mkt.outcomes["101"]?.players?.["0"]?.price || 0);
-    const d = parseFloat(mkt.outcomes["102"]?.players?.["0"]?.price || 0);
-    const a = parseFloat(mkt.outcomes["103"]?.players?.["0"]?.price || 0);
+    const markets = bk.markets || bk.odds || {};
+    const mkt = markets["101"] || Object.values(markets)[0];
+    if (!mkt) continue;
+    const outcomes = mkt.outcomes || mkt;
+    const getPrice = (id) => {
+      const o = outcomes[id] || outcomes[String(id)];
+      if (!o) return 0;
+      return parseFloat(o.price || o.players?.["0"]?.price || o.odd || 0);
+    };
+    const h = getPrice("101"), d = getPrice("102"), a = getPrice("103");
     if (h > 1) bestH = Math.max(bestH, h);
     if (d > 1) bestD = Math.max(bestD, d);
     if (a > 1) bestA = Math.max(bestA, a);
@@ -219,32 +224,48 @@ async function getOddsPapiMatches() {
   if (!ODDSPAPI_KEY) return [];
   const today    = new Date().toISOString().slice(0, 10);
   const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-  const opts = { signal: AbortSignal.timeout(12000) };
+  // 25s total budget: fixture call + up to 5 odds batches × 2.2s each ≈ 15s
+  const opts = { signal: AbortSignal.timeout(25000) };
   try {
+    // Fetch today+tomorrow only — keeps tournament ID count manageable
     const fxResp = await fetch(
       `${OP_BASE}/fixtures?sportId=10&from=${today}&to=${tomorrow}&hasOdds=true&apiKey=${ODDSPAPI_KEY}`,
       opts
     );
-    if (!fxResp.ok) return [];
+    if (!fxResp.ok) {
+      console.error("OddsPapi fixtures failed:", fxResp.status);
+      return [];
+    }
     const fxRaw = await fxResp.json();
     const fixtures = Array.isArray(fxRaw) ? fxRaw : (fxRaw.data || fxRaw.fixtures || []);
     if (!fixtures.length) return [];
 
-    // Bulk-fetch odds for all tournaments returned
-    const tids = [...new Set(fixtures.map(f => f.tournamentId).filter(Boolean))].join(",");
-    const oddsResp = await fetch(
-      `${OP_BASE}/odds-by-tournaments?tournamentIds=${tids}&bookmakers=bet365,pinnacle,1xbet,betway&apiKey=${ODDSPAPI_KEY}`,
-      opts
-    );
-    const oddsRaw = oddsResp.ok ? await oddsResp.json() : {};
-    const oddsFixtures = Array.isArray(oddsRaw) ? oddsRaw : (oddsRaw.fixtures || oddsRaw.data || []);
-
+    // Deduplicate tournament IDs, then chunk into batches of 15 (avoids URL-length issues
+    // and per-endpoint limits that cause 0 results with 397 IDs in one request).
+    const allTids = [...new Set(fixtures.map(f => f.tournamentId).filter(Boolean))];
+    const BATCH = 15;
+    const MAX_BATCHES = 5; // 5 × 2.2s = 11s; stays within 25s timeout
     const oddsMap = {};
-    for (const item of oddsFixtures) {
-      if (!item.fixtureId) continue;
-      const o = extractOpOdds(item.bookmakerOdds);
-      if (o) oddsMap[item.fixtureId] = o;
+
+    for (let i = 0; i < allTids.length && i < BATCH * MAX_BATCHES; i += BATCH) {
+      await new Promise(r => setTimeout(r, 2200)); // OddsPapi 2000ms cooldown
+      const batchTids = allTids.slice(i, i + BATCH).join(",");
+      const oddsResp = await fetch(
+        `${OP_BASE}/odds-by-tournaments?tournamentIds=${batchTids}&bookmaker=1xbet&apiKey=${ODDSPAPI_KEY}`,
+        opts
+      );
+      if (!oddsResp.ok) continue;
+      const oddsRaw = await oddsResp.json();
+      const items = Array.isArray(oddsRaw) ? oddsRaw : (oddsRaw.fixtures || oddsRaw.data || []);
+      for (const item of items) {
+        const fid = item.fixtureId || item.fixture_id || item.id;
+        if (!fid) continue;
+        const o = extractOpOdds(item.bookmakerOdds || item.odds || item.bookmakers);
+        if (o) oddsMap[String(fid)] = o;
+      }
     }
+
+    console.log(JSON.stringify({ level: "info", event: "oddspapi_odds", tids: allTids.length, batches: Math.min(Math.ceil(allTids.length / BATCH), MAX_BATCHES), priced: Object.keys(oddsMap).length }));
 
     const now = Date.now();
     const matches = fixtures.map(f => {
@@ -252,7 +273,8 @@ async function getOddsPapiMatches() {
       const minsToKO = Math.round((new Date(kickoff).getTime() - now) / 60000);
       const homeName = f.participant1Name || f.participant1ShortName || "Home";
       const awayName = f.participant2Name || f.participant2ShortName || "Away";
-      const o = oddsMap[f.fixtureId];
+      const fid = String(f.fixtureId || f.fixture_id || f.id || "");
+      const o = oddsMap[fid];
       const probs = o ? removVig(o.home, o.draw, o.away) : null;
       let xgData = null, probsData = null;
       if (probs) {
