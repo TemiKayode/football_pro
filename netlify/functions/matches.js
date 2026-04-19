@@ -5,8 +5,10 @@
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
 const SPORTMONKS_KEY = process.env.SPORTMONKS_KEY || "";
-const BASE = "https://api.the-odds-api.com/v4";
+const ODDSPAPI_KEY  = process.env.ODDSPAPI_KEY  || "";
+const BASE    = "https://api.the-odds-api.com/v4";
 const SM_BASE = "https://api.sportmonks.com/v3/football";
+const OP_BASE = "https://api.oddspapi.io/v4";
 // AF_ODDS_ENABLED: opt-in only — adds 12 API-Football calls/refresh which burns free-tier (100/day) fast.
 // Set AF_ODDS_ENABLED=true in Netlify env only if you have a paid AF plan.
 const AF_ODDS_ENABLED = process.env.AF_ODDS_ENABLED === "true";
@@ -192,6 +194,108 @@ function applyAfOdds(fixtures, oddsMap) {
       modelReady: true,
     };
   });
+}
+
+// ── OddsPapi integration ──────────────────────────────────────────────────────
+// 2 calls per refresh: /fixtures (today+tomorrow) → /odds-by-tournaments (bulk)
+// Market 101 = Full Time Result (1X2), outcomes: 101=Home, 102=Draw, 103=Away
+
+function extractOpOdds(bookmakerOdds) {
+  let bestH = 0, bestD = 0, bestA = 0;
+  for (const bk of Object.values(bookmakerOdds || {})) {
+    const mkt = (bk.markets || {})["101"] || Object.values(bk.markets || {})[0];
+    if (!mkt?.outcomes) continue;
+    const h = parseFloat(mkt.outcomes["101"]?.players?.["0"]?.price || 0);
+    const d = parseFloat(mkt.outcomes["102"]?.players?.["0"]?.price || 0);
+    const a = parseFloat(mkt.outcomes["103"]?.players?.["0"]?.price || 0);
+    if (h > 1) bestH = Math.max(bestH, h);
+    if (d > 1) bestD = Math.max(bestD, d);
+    if (a > 1) bestA = Math.max(bestA, a);
+  }
+  return (bestH > 1 && bestD > 1 && bestA > 1) ? { home: bestH, draw: bestD, away: bestA } : null;
+}
+
+async function getOddsPapiMatches() {
+  if (!ODDSPAPI_KEY) return [];
+  const today    = new Date().toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const opts = { signal: AbortSignal.timeout(12000) };
+  try {
+    const fxResp = await fetch(
+      `${OP_BASE}/fixtures?sportId=10&from=${today}&to=${tomorrow}&hasOdds=true&apiKey=${ODDSPAPI_KEY}`,
+      opts
+    );
+    if (!fxResp.ok) return [];
+    const fxRaw = await fxResp.json();
+    const fixtures = Array.isArray(fxRaw) ? fxRaw : (fxRaw.data || fxRaw.fixtures || []);
+    if (!fixtures.length) return [];
+
+    // Bulk-fetch odds for all tournaments returned
+    const tids = [...new Set(fixtures.map(f => f.tournamentId).filter(Boolean))].join(",");
+    const oddsResp = await fetch(
+      `${OP_BASE}/odds-by-tournaments?tournamentIds=${tids}&bookmakers=bet365,pinnacle,1xbet,betway&apiKey=${ODDSPAPI_KEY}`,
+      opts
+    );
+    const oddsRaw = oddsResp.ok ? await oddsResp.json() : {};
+    const oddsFixtures = Array.isArray(oddsRaw) ? oddsRaw : (oddsRaw.fixtures || oddsRaw.data || []);
+
+    const oddsMap = {};
+    for (const item of oddsFixtures) {
+      if (!item.fixtureId) continue;
+      const o = extractOpOdds(item.bookmakerOdds);
+      if (o) oddsMap[item.fixtureId] = o;
+    }
+
+    const now = Date.now();
+    const matches = fixtures.map(f => {
+      const kickoff = f.startTime || f.start_time || new Date().toISOString();
+      const minsToKO = Math.round((new Date(kickoff).getTime() - now) / 60000);
+      const homeName = f.participant1Name || f.participant1ShortName || "Home";
+      const awayName = f.participant2Name || f.participant2ShortName || "Away";
+      const o = oddsMap[f.fixtureId];
+      const probs = o ? removVig(o.home, o.draw, o.away) : null;
+      let xgData = null, probsData = null;
+      if (probs) {
+        const { xgH, xgA } = estimateXG(probs.H, probs.D, probs.A);
+        const o25 = over25Prob(xgH, xgA);
+        xgData = { home: xgH, away: xgA };
+        probsData = { H: probs.H, D: probs.D, A: probs.A, O25: o25, U25: 100 - o25 };
+      }
+      return {
+        id: `op_${f.fixtureId}`,
+        home: homeName,
+        away: awayName,
+        league: String(f.tournamentId || "op"),
+        leagueName: f.tournamentName || "Football",
+        leagueFlag: "⚽",
+        country: f.categoryName || "",
+        kickoff,
+        minsToKO,
+        isLive: f.statusId === 1,
+        isToday:    new Date(kickoff).toDateString() === new Date().toDateString(),
+        isTomorrow: new Date(kickoff).toDateString() === new Date(Date.now() + 86400000).toDateString(),
+        odds: o
+          ? { home: o.home, draw: o.draw, away: o.away, over25: 0, under25: 0 }
+          : { home: 0, draw: 0, away: 0, over25: 0, under25: 0 },
+        bks: { home: "OddsPapi", draw: "OddsPapi", away: "OddsPapi", over: "", under: "" },
+        probs: probsData,
+        xg: xgData,
+        modelReady: probs != null,
+        source: "oddspapi",
+      };
+    }).filter(m => m.home !== "Home" || m.away !== "Away");
+
+    matches.sort((a, b) => {
+      if (a.isLive && !b.isLive) return -1;
+      if (!a.isLive && b.isLive) return 1;
+      return new Date(a.kickoff) - new Date(b.kickoff);
+    });
+    console.log(JSON.stringify({ level: "info", event: "oddspapi_ready", total: matches.length, priced: matches.filter(m => m.modelReady).length }));
+    return matches;
+  } catch (e) {
+    console.error("OddsPapi failed:", e.message);
+    return [];
+  }
 }
 
 // ── Sportmonks integration ────────────────────────────────────────────────────
@@ -531,6 +635,25 @@ exports.handler = async (event) => {
   }
 
   if (!ODDS_API_KEY) {
+    // OddsPapi: 2 calls (fixtures + bulk odds), global coverage, 200+ bookmakers
+    const op = await getOddsPapiMatches();
+    if (op.length) {
+      const priced = op.filter(m => m.modelReady).length;
+      const payload = {
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: op,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(op.map(m => m.league)).size,
+        note: priced > 0
+          ? `${priced} of ${op.length} matches priced via OddsPapi (${priced > 0 ? "bet365/Pinnacle/1xBet" : "no odds"}).`
+          : "Fixtures from OddsPapi — no 1X2 odds returned for current fixtures.",
+        stale: false,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
     // Sportmonks: fixtures + pre-match odds in one request, ~200 req/hour free
     const sm = await getSportmonksFixtures();
     if (sm.length) {
@@ -614,7 +737,26 @@ exports.handler = async (event) => {
 
   if (allMatches.length === 0) {
     console.warn(JSON.stringify({ level: "warn", event: "matches_empty_provider", fixtureFallback: true }));
-    // Sportmonks as first fallback when Odds API quota is exhausted
+    // OddsPapi as first fallback when Odds API quota is exhausted
+    const op = await getOddsPapiMatches();
+    if (op.length) {
+      const priced = op.filter(m => m.modelReady).length;
+      const payload = {
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: op,
+        updated: new Date().toISOString(),
+        leagues: TOP_LEAGUES,
+        totalLeagues: new Set(op.map(m => m.league)).size,
+        note: priced > 0
+          ? `Odds API quota exhausted. ${priced} matches priced via OddsPapi. Renew ODDS_API_KEY for broader coverage.`
+          : "Odds API quota exhausted. OddsPapi fixtures only — odds not available for today's matches.",
+        stale: true,
+      };
+      cachedResponse = payload;
+      cachedAt = Date.now();
+      return { statusCode: 200, headers, body: JSON.stringify(payload) };
+    }
+    // Sportmonks as second fallback when Odds API quota is exhausted
     const sm = await getSportmonksFixtures();
     if (sm.length) {
       const priced = sm.filter(m => m.modelReady).length;
