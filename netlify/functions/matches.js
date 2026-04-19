@@ -5,6 +5,9 @@
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
 const BASE = "https://api.the-odds-api.com/v4";
+// AF_ODDS_ENABLED: opt-in only — adds 12 API-Football calls/refresh which burns free-tier (100/day) fast.
+// Set AF_ODDS_ENABLED=true in Netlify env only if you have a paid AF plan.
+const AF_ODDS_ENABLED = process.env.AF_ODDS_ENABLED === "true";
 const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
 const { getAllScoreboardRows } = require("./scores");
 let cachedResponse = null;
@@ -354,7 +357,7 @@ async function parseApiFootballResponse(resp) {
  */
 async function getApiFootballFixtures() {
   if (!API_FOOTBALL_KEY) return [];
-  const days = Math.min(14, Math.max(1, Number.parseInt(process.env.FIXTURES_DAYS || "7", 10)));
+  const days = Math.min(14, Math.max(1, Number.parseInt(process.env.FIXTURES_DAYS || "2", 10)));
   const maxRows = Number.parseInt(process.env.MAX_AF_FIXTURES || "800", 10);
   const headers = { "x-apisports-key": API_FOOTBALL_KEY };
   const opts = { headers, signal: AbortSignal.timeout(15000) };
@@ -444,8 +447,8 @@ exports.handler = async (event) => {
     const af = await getApiFootballFixtures();
     if (af.length) {
       const today = new Date().toISOString().slice(0, 10);
-      const oddsMap = await fetchAfOddsMap(today).catch(() => ({}));
-      const enriched = applyAfOdds(af, oddsMap);
+      const oddsMap = AF_ODDS_ENABLED ? await fetchAfOddsMap(today).catch(() => ({})) : {};
+      const enriched = AF_ODDS_ENABLED ? applyAfOdds(af, oddsMap) : af;
       const priced = enriched.filter(m => m.modelReady).length;
       const payload = {
         dataMode: priced > 0 ? "odds" : "fixtures",
@@ -508,8 +511,8 @@ exports.handler = async (event) => {
     const af = await getApiFootballFixtures();
     if (af.length) {
       const today = new Date().toISOString().slice(0, 10);
-      const oddsMap = await fetchAfOddsMap(today).catch(() => ({}));
-      const enriched = applyAfOdds(af, oddsMap);
+      const oddsMap = AF_ODDS_ENABLED ? await fetchAfOddsMap(today).catch(() => ({})) : {};
+      const enriched = AF_ODDS_ENABLED ? applyAfOdds(af, oddsMap) : af;
       const priced = enriched.filter(m => m.modelReady).length;
       const payload = {
         dataMode: priced > 0 ? "odds" : "fixtures",
@@ -519,7 +522,7 @@ exports.handler = async (event) => {
         totalLeagues: new Set(enriched.map((m) => m.league)).size,
         note: priced > 0
           ? `The Odds API quota is exhausted. ${priced} matches priced via API-Football odds (Bet365). Renew ODDS_API_KEY for full league coverage.`
-          : "The Odds API quota is exhausted and API-Football has no odds for today. Showing fixtures only.",
+          : "The Odds API quota is exhausted. Showing fixtures only — set ODDS_API_KEY or AF_ODDS_ENABLED=true for predictions.",
         stale: true,
       };
       cachedResponse = payload;
