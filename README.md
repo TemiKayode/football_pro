@@ -3,6 +3,8 @@
 Real-time football analytics dashboard covering the **top 10 leagues worldwide**.
 Runs as a static site on **Netlify** with serverless functions, or locally with Python/Flask.
 
+<img width="1889" height="834" alt="image" src="https://github.com/user-attachments/assets/88099c97-6caa-44ac-ae40-08bdca266ab5" />
+
 ![Leagues](https://img.shields.io/badge/Leagues-10-blue) ![Auto Refresh](https://img.shields.io/badge/Auto--refresh-60s-green) ![Netlify](https://img.shields.io/badge/Deployed-Netlify-teal)
 
 ---
