@@ -130,6 +130,65 @@ function kelly(prob, odds, fraction = 0.25) {
   return k > 0 ? Math.round(k * fraction * 100) / 100 : 0;
 }
 
+// API-Football league IDs matching our TOP_LEAGUES
+const AF_TOP_LEAGUE_IDS = [2, 3, 39, 61, 71, 78, 88, 94, 128, 135, 140, 848];
+
+let afOddsCache = null;
+let afOddsCachedAt = 0;
+
+// Fetch pre-match odds from API-Football for today's top-league fixtures.
+// Uses a 60-minute cache to stay within free-tier quota (100 req/day).
+async function fetchAfOddsMap(date) {
+  if (!API_FOOTBALL_KEY) return {};
+  const nowMs = Date.now();
+  if (afOddsCache && nowMs - afOddsCachedAt < 3600000) return afOddsCache;
+  const yr = new Date().getMonth() < 7 ? new Date().getFullYear() - 1 : new Date().getFullYear();
+  const opts = { headers: { "x-apisports-key": API_FOOTBALL_KEY }, signal: AbortSignal.timeout(12000) };
+  const urls = AF_TOP_LEAGUE_IDS.map(
+    lid => `https://v3.football.api-sports.io/odds?league=${lid}&season=${yr}&date=${date}&bookmaker=8`
+  );
+  const results = await Promise.allSettled(urls.map(u => fetch(u, opts).then(r => r.ok ? r.json() : null).catch(() => null)));
+  const oddsMap = {};
+  for (const r of results) {
+    if (r.status !== "fulfilled" || !r.value?.response) continue;
+    for (const item of r.value.response) {
+      const fid = item.fixture?.id;
+      if (!fid) continue;
+      for (const bk of (item.bookmakers || [])) {
+        const mw = bk.bets?.find(b => b.id === 1);
+        if (!mw) continue;
+        const h = parseFloat(mw.values?.find(v => v.value === "Home")?.odd);
+        const d = parseFloat(mw.values?.find(v => v.value === "Draw")?.odd);
+        const a = parseFloat(mw.values?.find(v => v.value === "Away")?.odd);
+        if (h > 1 && d > 1 && a > 1) { oddsMap[`af_${fid}`] = { home: h, draw: d, away: a }; break; }
+      }
+    }
+  }
+  afOddsCache = oddsMap;
+  afOddsCachedAt = nowMs;
+  return oddsMap;
+}
+
+// Merge AF bookmaker odds into fixture-only match objects, computing xG/probs
+function applyAfOdds(fixtures, oddsMap) {
+  return fixtures.map(m => {
+    const o = oddsMap[m.id];
+    if (!o) return m;
+    const probs = removVig(o.home, o.draw, o.away);
+    if (!probs) return m;
+    const { xgH, xgA } = estimateXG(probs.H, probs.D, probs.A);
+    const o25 = over25Prob(xgH, xgA);
+    return {
+      ...m,
+      odds: { home: o.home, draw: o.draw, away: o.away, over25: 0, under25: 0 },
+      bks: { home: "Bet365", draw: "Bet365", away: "Bet365", over: "", under: "" },
+      probs: { H: probs.H, D: probs.D, A: probs.A, O25: o25, U25: 100 - o25 },
+      xg: { home: xgH, away: xgA },
+      modelReady: true,
+    };
+  });
+}
+
 async function fetchLeague(leagueKey) {
   const url = `${BASE}/sports/${leagueKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h,totals&oddsFormat=decimal`;
   try {
@@ -384,14 +443,19 @@ exports.handler = async (event) => {
     }
     const af = await getApiFootballFixtures();
     if (af.length) {
+      const today = new Date().toISOString().slice(0, 10);
+      const oddsMap = await fetchAfOddsMap(today).catch(() => ({}));
+      const enriched = applyAfOdds(af, oddsMap);
+      const priced = enriched.filter(m => m.modelReady).length;
       const payload = {
-        dataMode: "fixtures",
-        matches: af,
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: enriched,
         updated: new Date().toISOString(),
         leagues: TOP_LEAGUES,
-        totalLeagues: new Set(af.map((m) => m.league)).size,
-        note:
-          "Schedules from API-Football only (no % / xG / picks — not computed without market odds). Set ODDS_API_KEY with quota so The Odds API can supply prices; then Poisson, xG, and edges are calculated from those prices.",
+        totalLeagues: new Set(enriched.map((m) => m.league)).size,
+        note: priced > 0
+          ? `${priced} matches priced via API-Football odds. Set ODDS_API_KEY for full coverage across all leagues.`
+          : "Schedules from API-Football only. Set ODDS_API_KEY for odds, xG, and value picks.",
         stale: false,
       };
       cachedResponse = payload;
@@ -443,14 +507,19 @@ exports.handler = async (event) => {
     }
     const af = await getApiFootballFixtures();
     if (af.length) {
+      const today = new Date().toISOString().slice(0, 10);
+      const oddsMap = await fetchAfOddsMap(today).catch(() => ({}));
+      const enriched = applyAfOdds(af, oddsMap);
+      const priced = enriched.filter(m => m.modelReady).length;
       const payload = {
-        dataMode: "fixtures",
-        matches: af,
+        dataMode: priced > 0 ? "odds" : "fixtures",
+        matches: enriched,
         updated: new Date().toISOString(),
         leagues: TOP_LEAGUES,
-        totalLeagues: new Set(af.map((m) => m.league)).size,
-        note:
-          "The Odds API returned no priced events. Fixture list from API-Football. Poisson, xG, and picks require real book prices — we do not show placeholder probabilities.",
+        totalLeagues: new Set(enriched.map((m) => m.league)).size,
+        note: priced > 0
+          ? `The Odds API quota is exhausted. ${priced} matches priced via API-Football odds (Bet365). Renew ODDS_API_KEY for full league coverage.`
+          : "The Odds API quota is exhausted and API-Football has no odds for today. Showing fixtures only.",
         stale: true,
       };
       cachedResponse = payload;
