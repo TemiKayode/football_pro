@@ -23,26 +23,14 @@ function poissonPmf(k, lam) {
   return Math.exp(-lam + k * Math.log(lam) - Math.log(fact(k)));
 }
 
-const RHO = -0.13; // Dixon-Coles low-score correlation
-
-function dcFactor(lh, la, i, j) {
-  if (i === 0 && j === 0) return 1 - lh * la * RHO;
-  if (i === 1 && j === 0) return 1 + la * RHO;
-  if (i === 0 && j === 1) return 1 + lh * RHO;
-  if (i === 1 && j === 1) return 1 - RHO;
-  return 1;
-}
-
-/** Dixon-Coles corrected Poisson 1X2 from xG lambdas. */
-function poisson1x2(lamH, lamA, maxG = 8) {
+/** Independent Poisson 1X2 from xG lambdas (can disagree with market → real value signals). */
+function poisson1x2(lamH, lamA, maxG = 6) {
   let pH = 0;
   let pD = 0;
   let pA = 0;
   for (let i = 0; i <= maxG; i++) {
-    const piH = poissonPmf(i, lamH);
     for (let j = 0; j <= maxG; j++) {
-      const dc = i <= 1 && j <= 1 ? dcFactor(lamH, lamA, i, j) : 1;
-      const p = piH * poissonPmf(j, lamA) * dc;
+      const p = poissonPmf(i, lamH) * poissonPmf(j, lamA);
       if (i > j) pH += p;
       else if (i === j) pD += p;
       else pA += p;
