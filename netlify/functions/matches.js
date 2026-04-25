@@ -7,6 +7,40 @@ const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
 const BASE = "https://api.the-odds-api.com/v4";
 const { jsonHeaders, rateLimit, requireAuth } = require("./_lib/auth");
 const { getAllScoreboardRows } = require("./scores");
+
+// Maps API-Football numeric league IDs to Odds API sport keys (used by dropdown filter)
+const AF_LEAGUE_ID_TO_KEY = {
+  39: "soccer_epl",
+  140: "soccer_spain_la_liga",
+  78: "soccer_germany_bundesliga",
+  135: "soccer_italy_serie_a",
+  61: "soccer_france_ligue_one",
+  2: "soccer_champions_league",
+  3: "soccer_europa_league",
+  848: "soccer_uefa_europa_conference_league",
+  88: "soccer_netherlands_eredivisie",
+  94: "soccer_portugal_primeira_liga",
+  71: "soccer_brazil_campeonato",
+  128: "soccer_argentina_primera_division",
+};
+
+// Maps football-data.org competition IDs to Odds API sport keys
+const FD_COMP_ID_TO_KEY = {
+  PL:   "soccer_epl",
+  PD:   "soccer_spain_la_liga",
+  BL1:  "soccer_germany_bundesliga",
+  SA:   "soccer_italy_serie_a",
+  FL1:  "soccer_france_ligue_one",
+  CL:   "soccer_champions_league",
+  EL:   "soccer_europa_league",
+  UEL:  "soccer_europa_league",
+  UECL: "soccer_uefa_europa_conference_league",
+  ECL:  "soccer_uefa_europa_conference_league",
+  DED:  "soccer_netherlands_eredivisie",
+  PPL:  "soccer_portugal_primeira_liga",
+  BSA:  "soccer_brazil_campeonato",
+  CLI:  "soccer_argentina_primera_division",
+};
 let cachedResponse = null;
 let cachedAt = 0;
 
@@ -183,7 +217,7 @@ function fixtureRowsToMatches(rows) {
       id: `fd_${m.id}`,
       home: m.home,
       away: m.away,
-      league: (m.competition || "football").toLowerCase(),
+      league: FD_COMP_ID_TO_KEY[m.competition] || (m.competition || "football").toLowerCase(),
       leagueName: m.compName || m.competition || "Football",
       leagueFlag: m.flag || "⚽",
       country: "",
@@ -217,7 +251,7 @@ function mapApiFootballFixtureItem(item) {
     id: `af_${f.id}`,
     home: teams?.home?.name || "Home",
     away: teams?.away?.name || "Away",
-    league: String(league?.id || "api-football"),
+    league: AF_LEAGUE_ID_TO_KEY[league?.id] || String(league?.id || "api-football"),
     leagueName: league?.name || "Football",
     leagueFlag: league?.country || "⚽",
     country: league?.country || "",

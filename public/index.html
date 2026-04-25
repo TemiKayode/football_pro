@@ -483,8 +483,8 @@ function normalizeAccasNetlify(raw){
   return o;
 }
 
-const LP={soccer_epl:'lp-e',soccer_germany_bundesliga:'lp-b',soccer_italy_serie_a:'lp-s',soccer_france_ligue_one:'lp-l',soccer_spain_la_liga:'lp-ll',soccer_netherlands_eredivisie:'lp-u',soccer_portugal_primeira_liga:'lp-p',soccer_champions_league:'lp-c',soccer_europa_league:'lp-c',soccer_brazil_campeonato:'lp-p'};
-const LN={soccer_epl:'EPL',soccer_germany_bundesliga:'BL',soccer_italy_serie_a:'SA',soccer_france_ligue_one:'L1',soccer_spain_la_liga:'LaLiga',soccer_netherlands_eredivisie:'ERE',soccer_portugal_primeira_liga:'POR',soccer_champions_league:'UCL',soccer_europa_league:'UEL',soccer_brazil_campeonato:'BRA'};
+const LP={soccer_epl:'lp-e',soccer_germany_bundesliga:'lp-b',soccer_italy_serie_a:'lp-s',soccer_france_ligue_one:'lp-l',soccer_spain_la_liga:'lp-ll',soccer_netherlands_eredivisie:'lp-u',soccer_portugal_primeira_liga:'lp-p',soccer_champions_league:'lp-c',soccer_europa_league:'lp-c',soccer_uefa_europa_conference_league:'lp-c',soccer_brazil_campeonato:'lp-p',soccer_argentina_primera_division:'lp-x'};
+const LN={soccer_epl:'EPL',soccer_germany_bundesliga:'BL',soccer_italy_serie_a:'SA',soccer_france_ligue_one:'L1',soccer_spain_la_liga:'LaLiga',soccer_netherlands_eredivisie:'ERE',soccer_portugal_primeira_liga:'POR',soccer_champions_league:'UCL',soccer_europa_league:'UEL',soccer_uefa_europa_conference_league:'UECL',soccer_brazil_campeonato:'BRA',soccer_argentina_primera_division:'LigaPro'};
 
 function lp(lg){
   const key=String(lg||'');
@@ -538,6 +538,16 @@ async function loadAll(){
   S.picks=(pk.picks||[]).map(normalizePick);
   S.accas=ac.accumulators||{};
   S.live=lv.live||[];
+  // Rebuild league dropdown from API leagues so keys always match the filter
+  if(m.leagues&&m.leagues.length){
+    const lgSel=document.getElementById('mlg');
+    if(lgSel){
+      const cur=lgSel.value;
+      lgSel.innerHTML='<option value="">All leagues</option>'+
+        m.leagues.map(l=>`<option value="${l.key}">${l.name}</option>`).join('');
+      if(cur)lgSel.value=cur;
+    }
+  }
   S.meta={updated:m.updated,note:m.note||'',stale:!!m.stale,dataMode:m.dataMode||'',credits:(m.credits??null)};
   document.getElementById('dm-m').textContent=S.matches.length;
   document.getElementById('dm-p').textContent=S.picks.length;
