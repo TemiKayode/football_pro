@@ -13,9 +13,18 @@ jobs:
     steps:
       - name: Trigger Netlify build hook
         run: |
+          if [ -z "$NETLIFY_BUILD_HOOK" ]; then
+            echo "ERROR: NETLIFY_BUILD_HOOK secret is not set" >&2
+            exit 1
+          fi
           echo "Triggering daily Netlify build at $(date -u)"
-          curl -s -o response.json -w "%{http_code}" -X POST "${{ secrets.NETLIFY_BUILD_HOOK }}"
+          HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST "$NETLIFY_BUILD_HOOK")
+          echo "HTTP status: $HTTP_CODE"
           echo "Response: $(cat response.json)"
-
-      - name: Confirm success
-        run: echo "Daily refresh triggered successfully"
+          if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
+            echo "ERROR: Netlify build hook returned $HTTP_CODE" >&2
+            exit 1
+          fi
+          echo "Daily refresh triggered successfully"
+        env:
+          NETLIFY_BUILD_HOOK: ${{ secrets.NETLIFY_BUILD_HOOK }}
